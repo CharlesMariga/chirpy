@@ -1,35 +1,87 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync/atomic"
+	"time"
+
+	"github.com/charlesmariga/chirpy/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+	db             *database.Queries
+	platform       string
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserId    uuid.UUID `json:"user_id"`
 }
 
 func main() {
 	const filepathRoot = "."
 	const port = "8080"
 
-	cfg := &apiConfig{
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		log.Fatal("DB_URL must be set")
+	}
+
+	platform := os.Getenv("PLATFORM")
+	if platform == "" {
+		log.Fatal("PLATFORM must be set")
+	}
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dbQueries := database.New(db)
+
+	apiCfg := &apiConfig{
 		fileServerHits: atomic.Int32{},
+		db:             dbQueries,
+		platform:       platform,
 	}
 
 	mux := http.NewServeMux()
 
-	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))))
+	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))))
+
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+
+	mux.HandleFunc("POST /api/chirps", apiCfg.handleChirpsCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpRetrieve)
+
+	mux.HandleFunc("POST /admin/reset", apiCfg.handlerResetHits)
 	mux.HandleFunc("GET /admin/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "<html>\n  <body>\n    <h1>Welcome, Chirpy Admin</h1>\n    <p>Chirpy has been visited %d times!</p>\n  </body>\n</html>", cfg.fileServerHits.Load())
+		fmt.Fprintf(w, "<html>\n  <body>\n    <h1>Welcome, Chirpy Admin</h1>\n    <p>Chirpy has been visited %d times!</p>\n  </body>\n</html>", apiCfg.fileServerHits.Load())
 	})
-	mux.HandleFunc("GET /api/healthz", handlerReadiness)
-	mux.HandleFunc("POST /admin/reset", cfg.handlerResetHits)
-	mux.HandleFunc("POST /api/validate_chirp", handlerValidate)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -40,15 +92,15 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-// func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, _ *http.Request) {
+// func (apiCfg *apiConfig) handlerMetrics(w http.ResponseWriter, _ *http.Request) {
 // 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 // 	w.WriteHeader(http.StatusOK)
-// 	fmt.Fprintf(w, "Hits: %d\n", cfg.fileServerHits.Load())
+// 	fmt.Fprintf(w, "Hits: %d\n", apiCfg.fileServerHits.Load())
 // }
 
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+func (apiCfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileServerHits.Add(1)
+		apiCfg.fileServerHits.Add(1)
 		next.ServeHTTP(w, r)
 	})
 }
