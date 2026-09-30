@@ -5,22 +5,33 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/charlesmariga/chirpy/internal/auth"
 	"github.com/charlesmariga/chirpy/internal/database"
-	"github.com/google/uuid"
 )
 
 func (apiCfg *apiConfig) handleChirpsCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type chirp struct {
 		Chirp
 	}
 
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized", err)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, apiCfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized", err)
+		return
+	}
+
 	params := parameters{}
-	err := json.NewDecoder(r.Body).Decode(&params)
+	err = json.NewDecoder(r.Body).Decode(&params)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
 		return
@@ -45,7 +56,7 @@ func (apiCfg *apiConfig) handleChirpsCreate(w http.ResponseWriter, r *http.Reque
 
 	body := strings.Join(words, " ")
 	newChirp, err := apiCfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
-		UserID: params.UserId,
+		UserID: userID,
 		Body:   body,
 	})
 	if err != nil {
